@@ -1,0 +1,13 @@
+{
+  "list": ["FungibleToken"],
+  "contracts": {
+    "FungibleToken": {
+      "goerli": {
+        "address": "0x9Bb7ab26573fFFE3a68D199D5a910F177F1B8975",
+        "constructorArgs": ["0x9086701Ecc7eFe724fC906DDF5Bf7D481FA3B055"],
+        "isVerified": true,
+        "isProxy": false
+      }
+    }
+  }
+}
