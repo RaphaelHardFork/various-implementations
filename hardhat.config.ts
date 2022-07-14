@@ -38,7 +38,9 @@ const ETHERSCAN_KEY = process.env.ETHERSCAN_KEY;
 // You need to export an object to set up your config
 // Go to https://hardhat.org/config/ to learn more
 const config: HardhatUserConfig = {
-  solidity: "0.8.13",
+  solidity: {
+    compilers: [{ version: "0.8.13" }],
+  },
   networks: {
     mainnet: {
       url: `https://mainnet.infura.io/v3/${INFURA_PROJECT_ID}`,
