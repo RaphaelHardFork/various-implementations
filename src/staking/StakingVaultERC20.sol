@@ -43,6 +43,7 @@ contract StakingVaultERC20 is IERC900, Ownable {
 
     event RewardPaid(address indexed account, uint256 amount);
 
+    /// @notice REMOVE IT
     event log(uint256 log);
 
     constructor(address rewardToken, address stakedToken_) {
@@ -61,9 +62,20 @@ contract StakingVaultERC20 is IERC900, Ownable {
     }
 
     /**
-     * @dev Deposit amount to distribute as reward, amount cannot be retrivied then.
-     *      If there is no staked amount, checks are done with {_totalStacked == 1000 TOKEN} and the amount
-     *      is stored in a temp_pool.
+     * @dev Deposit `amount` of {rewardToken} into the contract for the distribution,
+     *      This function is restricted to the `owner`.
+     *
+     *      The distribution start only if the amount staked in the contract is non-null,
+     *      in this case the amount is stored in {_depositPool}. The distribution will start
+     *      once an user stake an amount into the contract.
+     *
+     * Requirement:
+     *      - `lastBlock` should be greater than actual block and the previous lastBlock
+     *      - combinaison of `amount` & `lastBlock` should result a distribution over zero,
+     *      and increase the actual distribution if the distribution is active.
+     *
+     * @param amount    amount of token to deposit into the contract
+     * @param lastBlock last block where distribution occurs
      * */
     function deposit(uint256 amount, uint256 lastBlock)
         external
@@ -71,10 +83,10 @@ contract StakingVaultERC20 is IERC900, Ownable {
         triggerDistribution
     {
         require(
-            lastBlock >= _timeline.lastBlockWithReward,
+            lastBlock >= _timeline.lastBlockWithReward &&
+                lastBlock > block.number,
             "Staking: shorter distribution"
         );
-        require(lastBlock > block.number, "Staking: wrong end block");
 
         // transfer token
         IERC20(token).transferFrom(msg.sender, address(this), amount);
@@ -107,8 +119,9 @@ contract StakingVaultERC20 is IERC900, Ownable {
         }
 
         // add to current distribution and set it
+        // this check is not performed when RBT = 0
         uint256 currentRBT = _currentRewardPerBlockPerToken;
-        uint256 updatedRBT = _updateRBT(amount, lastBlock);
+        uint256 updatedRBT = _updateRBT(amount, lastBlock, 0);
         require(updatedRBT >= currentRBT, "Staking: lower rewards");
     }
 
@@ -121,29 +134,27 @@ contract StakingVaultERC20 is IERC900, Ownable {
         uint256 amount,
         bytes calldata data
     ) public triggerDistribution triggerRewards(addr) {
+        uint256 rewardAmount;
+        uint256 lastBlock = _timeline.lastBlockWithReward;
+
+        // update RBT only if active distribution
+        // before update the stake amount
+        if (_currentRewardPerBlockPerToken > 0) {
+            _updateRBT(rewardAmount, lastBlock, int256(amount));
+        } else if (_depositPool > 0) {
+            // active distribution
+            lastBlock += uint64(block.number) - _timeline.depositBlock;
+            rewardAmount = _depositPool;
+            delete _depositPool;
+            _updateRBT(rewardAmount, lastBlock, int256(amount));
+        }
+
         // update stake state
         _stakedAmount[addr] += amount;
         _totalStaked += amount;
         _rewardPerTokenPaid[addr] = _rewardPerTokenDistributed;
         IERC20(stakedToken).transferFrom(addr, address(this), amount);
         emit Staked(addr, amount, _totalStaked, data);
-
-        uint256 rewardAmount;
-        uint256 lastBlock = _timeline.lastBlockWithReward;
-
-        if (_totalStaked - amount == 0) {
-            if (_depositPool > 0) {
-                // active distribution
-                lastBlock += uint64(block.number) - _timeline.depositBlock;
-                rewardAmount = _depositPool;
-                delete _depositPool;
-            } else {
-                // stake without change distribution
-                return;
-            }
-        }
-
-        _updateRBT(rewardAmount, lastBlock);
     }
 
     function unstake(uint256 amount, bytes calldata data) external {
@@ -155,22 +166,28 @@ contract StakingVaultERC20 is IERC900, Ownable {
         uint256 amount,
         bytes calldata data
     ) public triggerDistribution triggerRewards(account) {
-        _stakedAmount[account] -= amount;
-        _totalStaked -= amount;
-        IERC20(token).transferFrom(address(this), account, amount);
-        emit Unstaked(account, amount, _totalStaked, data);
-
-        // stop distribution
-        if (_totalStaked == 0) {
+        // stop distribution if no more token in contract
+        if (_totalStaked - amount == 0) {
             uint256 remainingBlocks = _timeline.lastBlockWithReward >
                 block.number
                 ? uint256(_timeline.lastBlockWithReward) - block.number
                 : 0;
             uint256 remainingAmount = (_currentRewardPerBlockPerToken *
-                remainingBlocks) / PRECISION;
+                remainingBlocks *
+                _totalStaked) / PRECISION;
             delete _currentRewardPerBlockPerToken;
             _depositPool = remainingAmount;
+            _timeline.depositBlock = uint64(block.number);
+        } else {
+            // update RBT
+            _updateRBT(0, _timeline.lastBlockWithReward, int256(amount) * -1);
         }
+
+        // update stake state
+        _stakedAmount[account] -= amount;
+        _totalStaked -= amount;
+        IERC20(stakedToken).transfer(account, amount);
+        emit Unstaked(account, amount, _totalStaked, data);
     }
 
     function getReward(address account) external triggerDistribution {
@@ -208,15 +225,33 @@ contract StakingVaultERC20 is IERC900, Ownable {
     /**
      * @dev Update the last distribution block to the lastest block
      *      Add reward per token to distributed token per token
+     *
+     *      Should detect the end of distribution
      * */
     function _distribute() internal {
-        if (uint256(_timeline.lastDistributionBlock) <= block.number) {
-            uint256 elapsedBlocks = block.number -
-                uint256(_timeline.lastDistributionBlock);
+        uint256 lastBlock = block.number;
+        uint256 lastDistribution = uint256(_timeline.lastDistributionBlock);
+        if (lastDistribution <= block.number) {
+            if (
+                _timeline.lastBlockWithReward <= lastBlock &&
+                _timeline.lastBlockWithReward != 0 // if no deposit
+            ) {
+                // don't take block.number
+                lastBlock = _timeline.lastBlockWithReward;
+            }
+            // number of blocks
+            uint256 elapsedBlocks = lastBlock - lastDistribution;
+            // update reward pool
             _rewardPerTokenDistributed +=
                 elapsedBlocks *
                 _currentRewardPerBlockPerToken;
+
+            // end of reward
+            if (lastBlock == _timeline.lastBlockWithReward) {
+                delete _currentRewardPerBlockPerToken;
+            }
         }
+        // update last distribution block
         _timeline.lastDistributionBlock = uint64(block.number);
     }
 
@@ -249,19 +284,21 @@ contract StakingVaultERC20 is IERC900, Ownable {
      *      and if distribution is finished).
      *      Validate RBT and compare it to the previous (only for deposit)
      */
-    function _updateRBT(uint256 amount, uint256 lastBlock)
-        internal
-        returns (uint256 updatedRBT)
-    {
+    function _updateRBT(
+        uint256 amount,
+        uint256 lastBlock,
+        int256 totalStakedDelta
+    ) internal returns (uint256 updatedRBT) {
         uint256 remainingBlocks = _timeline.lastBlockWithReward > block.number
             ? uint256(_timeline.lastBlockWithReward) - block.number
             : 0;
         amount +=
             (_currentRewardPerBlockPerToken * _totalStaked * remainingBlocks) /
             PRECISION;
+        emit log(amount);
         updatedRBT = _validateRBT(
             amount,
-            _totalStaked,
+            uint256(int256(_totalStaked) + totalStakedDelta),
             lastBlock - block.number
         );
         _currentRewardPerBlockPerToken = updatedRBT;
