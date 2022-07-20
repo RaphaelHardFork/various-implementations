@@ -420,7 +420,7 @@ contract StakingVaultERC20_test is DSTest, Test {
         assertApproxEqAbs(rewards.balanceOf(USER1), deposit / 2, 10);
         assertApproxEqAbs(rewards.balanceOf(USER2), deposit + deposit / 2, 10);
 
-        assertEq(staking.timeline().depositBlock, 0);
+        assertEq(staking.timeline().depositBlock, 1000);
         assertEq(staking.timeline().lastBlockWithReward, 100000);
         assertEq(staking.timeline().lastDistributionBlock, 100001);
 
@@ -459,7 +459,7 @@ contract StakingVaultERC20_test is DSTest, Test {
         vm.roll(uint256(lastBlock) + 1);
         _userUnstake(USER2, staked2);
 
-        uint256 partOfDeposit = (deposit) / 100;
+        uint256 partOfDeposit = (deposit * 250) / 10000;
         assertApproxEqAbs(
             rewards.balanceOf(address(staking)),
             0,

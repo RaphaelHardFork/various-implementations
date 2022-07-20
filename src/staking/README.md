@@ -1,8 +1,7 @@
 # Staking contract
 
-## Tests
+This contract allow to distribute token block per block.
 
-- get rewards
-- make view function for amount of rewards
-- create context for fuzz testing
-- fuzz test for activation
+This contract implement the `IERC900` staking interface, is this is relevant?
+
+**This contract is not audited**, feel free to open issues, comments, ...
