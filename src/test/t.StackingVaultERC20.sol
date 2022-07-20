@@ -5,11 +5,13 @@ pragma solidity ^0.8.13;
 import "ds-test/test.sol";
 import "forge-std/Test.sol";
 import "forge-std/Vm.sol";
+import "openzeppelin-contracts/contracts/utils//math/SafeMath.sol";
 
 import "../BasicERC20.sol";
 import "../staking/StakingVaultERC20.sol";
 
 contract StakingVaultERC20_test is DSTest, Test {
+    using SafeMath for uint256;
     // CONSTANT
     address public constant OWNER = address(501);
     address public constant USER1 = address(1);
@@ -116,7 +118,7 @@ contract StakingVaultERC20_test is DSTest, Test {
         assertEq(token.balanceOf(address(staking)), 0);
         assertEq(staking.totalStakedFor(USER1), 0);
         assertEq(staking.totalStaked(), 0);
-        assertEq(staking.timeline().depositBlock, 6000);
+        assertEq(staking.timeline().depositBlock, 0);
         assertEq(staking.timeline().lastBlockWithReward, 0);
         assertEq(staking.timeline().lastDistributionBlock, 6000);
     }
@@ -128,6 +130,7 @@ contract StakingVaultERC20_test is DSTest, Test {
         _deposit(amount * 2, 30000);
 
         assertEq(staking.timeline().lastBlockWithReward, 30000);
+        assertEq(staking.timeline().depositBlock, 0, "deposit block");
         assertEq(staking.timeline().lastDistributionBlock, 2000);
         assertEq(
             staking.currentReward(),
@@ -193,7 +196,6 @@ contract StakingVaultERC20_test is DSTest, Test {
         assertEq(rewards.balanceOf(address(staking)), deposit);
         assertEq(token.balanceOf(address(staking)), staked);
         assertEq(staking.currentReward(), rbt, "rbt 0");
-        emit log_uint(staking.currentReward());
 
         // new stake
         vm.roll(25000);
@@ -326,10 +328,151 @@ contract StakingVaultERC20_test is DSTest, Test {
         assertApproxEqAbs(rewards.balanceOf(address(staking)), 0, 100);
     }
 
+    function testGetPartOfRewards(uint256 amount) public {
+        vm.assume(amount > 0);
+        uint256 deposit = 10000 * D18;
+        _deposit(deposit, 70000);
+        _userStake(USER1, amount);
+        _userStake(USER2, amount);
+
+        vm.roll(61000);
+        staking.getReward(USER1);
+        staking.getReward(USER2);
+
+        uint256 reward = _calculReward(staking.currentReward(), 60000, amount);
+
+        assertEq(rewards.balanceOf(USER1), reward);
+        assertEq(rewards.balanceOf(USER2), reward);
+        assertEq(rewards.balanceOf(address(staking)), deposit - 2 * reward);
+    }
+
+    function testComplexRepartition() public {
+        address USER3 = address(3);
+        address USER4 = address(4);
+        address USER5 = address(5);
+        uint256 amount = 20 * D18;
+        uint256 deposit = 10000 * D18;
+        vm.roll(0);
+        _deposit(deposit, 10000);
+        _userStake(USER1, amount);
+
+        vm.roll(5000);
+        _userStake(USER2, amount);
+        _userStake(USER3, amount);
+        _userStake(USER4, amount);
+        _userStake(USER5, amount);
+
+        vm.roll(10001);
+
+        staking.getReward(USER1);
+        assertApproxEqAbs(
+            rewards.balanceOf(USER1),
+            (deposit * 6000) / 10000,
+            10
+        );
+        staking.getReward(USER2);
+        assertApproxEqAbs(
+            rewards.balanceOf(USER2),
+            (deposit * 1000) / 10000,
+            10
+        );
+        staking.getReward(USER3);
+        assertApproxEqAbs(
+            rewards.balanceOf(USER3),
+            (deposit * 1000) / 10000,
+            10
+        );
+        staking.getReward(USER4);
+        assertApproxEqAbs(
+            rewards.balanceOf(USER4),
+            (deposit * 1000) / 10000,
+            10
+        );
+        staking.getReward(USER5);
+        assertApproxEqAbs(
+            rewards.balanceOf(USER5),
+            (deposit * 1000) / 10000,
+            10
+        );
+    }
+
+    function testNewDistributionAfterEnd() public {
+        // create dist, take reward for one user, new dist, take reward for both
+        uint256 amount = 200 * D18;
+        uint256 deposit = 10000 * D18;
+        _deposit(deposit, 50000);
+        _userStake(USER1, amount);
+        _userStake(USER2, amount);
+
+        vm.roll(70000);
+        _userUnstake(USER1, amount);
+
+        vm.roll(75000);
+        _deposit(deposit, 100000);
+
+        vm.roll(100001);
+        _userUnstake(USER2, amount);
+
+        assertApproxEqAbs(rewards.balanceOf(address(staking)), 0, 10);
+        assertEq(token.balanceOf(address(staking)), 0);
+        assertEq(token.balanceOf(USER1), amount);
+        assertEq(token.balanceOf(USER2), amount);
+        assertApproxEqAbs(rewards.balanceOf(USER1), deposit / 2, 10);
+        assertApproxEqAbs(rewards.balanceOf(USER2), deposit + deposit / 2, 10);
+
+        assertEq(staking.timeline().depositBlock, 0);
+        assertEq(staking.timeline().lastBlockWithReward, 100000);
+        assertEq(staking.timeline().lastDistributionBlock, 100001);
+
+        assertEq(staking.currentReward(), 0);
+        assertEq(staking.depositPool(), 0);
+    }
+
+    // --- test with big amount ---
+    function testWithBigAmount(
+        uint256 deposit,
+        uint256 staked1,
+        uint256 staked2,
+        uint64 lastBlock
+    ) public {
+        vm.assume(
+            staked1 >= 10000 && staked2 >= 10000 && deposit >= 1_000_000_000_000
+        );
+        vm.assume(lastBlock > 1000);
+        vm.roll(0);
+        _userStake(USER1, staked1);
+        _userStake(USER2, staked2);
+        _deposit(deposit, lastBlock);
+
+        vm.roll(lastBlock / 2);
+        uint256 rbt = staking.currentReward();
+        _userUnstake(USER1, staked1);
+
+        assertApproxEqAbs(
+            rewards.balanceOf(USER1),
+            _calculReward(rbt, lastBlock / 2, staked1),
+            10,
+            "User balance"
+        );
+
+        emit log_uint(staked2);
+        vm.roll(uint256(lastBlock) + 1);
+        _userUnstake(USER2, staked2);
+
+        uint256 partOfDeposit = (deposit) / 100;
+        assertApproxEqAbs(
+            rewards.balanceOf(address(staking)),
+            0,
+            partOfDeposit,
+            "Contract balance (2.5% of deposit)"
+        );
+    }
+
     // +-----------------------------------------------------+
     // |                        UTILS                        |
     // +-----------------------------------------------------+
     function _userStake(address user, uint256 amount) internal {
+        vm.assume(amount > 0);
         _mintTo(token, user, amount);
         vm.startPrank(user);
         token.approve(address(staking), amount);
@@ -375,7 +518,18 @@ contract StakingVaultERC20_test is DSTest, Test {
         uint256 rbt,
         uint256 elapsedBlocks,
         uint256 staked
-    ) internal pure returns (uint256) {
-        return (rbt * elapsedBlocks * staked) / 10**40;
+    ) internal returns (uint256) {
+        (bool flag, uint256 params) = elapsedBlocks.tryMul(staked);
+        if (!flag) {
+            emit log_string("Overflow on reward calcul (1)");
+        }
+
+        (flag, params) = params.tryMul(rbt);
+        if (!flag) {
+            emit log_string("Overflow on reward calcul (2)");
+        }
+
+        emit log_uint(params);
+        return params / 10**40;
     }
 }

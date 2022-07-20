@@ -166,21 +166,25 @@ contract StakingVaultERC20 is IERC900, Ownable {
         uint256 amount,
         bytes calldata data
     ) public triggerDistribution triggerRewards(account) {
+        uint256 lastBlockWithReward = _timeline.lastBlockWithReward;
         // stop distribution if no more token in contract
         if (_totalStaked - amount == 0) {
-            uint256 remainingBlocks = _timeline.lastBlockWithReward >
-                block.number
-                ? uint256(_timeline.lastBlockWithReward) - block.number
+            uint256 remainingBlocks = lastBlockWithReward > block.number
+                ? uint256(lastBlockWithReward) - block.number
                 : 0;
             uint256 remainingAmount = (_currentRewardPerBlockPerToken *
                 remainingBlocks *
                 _totalStaked) / PRECISION;
             delete _currentRewardPerBlockPerToken;
-            _depositPool = remainingAmount;
-            _timeline.depositBlock = uint64(block.number);
+            if (remainingAmount > 0) {
+                _depositPool = remainingAmount;
+                _timeline.depositBlock = uint64(block.number);
+            }
         } else {
-            // update RBT
-            _updateRBT(0, _timeline.lastBlockWithReward, int256(amount) * -1);
+            // update RBT only if dstribution active
+            if (_currentRewardPerBlockPerToken > 0) {
+                _updateRBT(0, lastBlockWithReward, int256(amount) * -1);
+            }
         }
 
         // update stake state
@@ -229,29 +233,32 @@ contract StakingVaultERC20 is IERC900, Ownable {
      *      Should detect the end of distribution
      * */
     function _distribute() internal {
-        uint256 lastBlock = block.number;
-        uint256 lastDistribution = uint256(_timeline.lastDistributionBlock);
-        if (lastDistribution <= block.number) {
-            if (
-                _timeline.lastBlockWithReward <= lastBlock &&
-                _timeline.lastBlockWithReward != 0 // if no deposit
-            ) {
-                // don't take block.number
-                lastBlock = _timeline.lastBlockWithReward;
-            }
-            // number of blocks
-            uint256 elapsedBlocks = lastBlock - lastDistribution;
-            // update reward pool
+        uint256 currentBlock = block.number;
+        uint256 lastBlockWithReward = _timeline.lastBlockWithReward;
+        uint256 lastDistributionBlock = _timeline.lastDistributionBlock;
+
+        // calculate reward until {lastBlockWithReward} maximum
+        if (block.number > lastBlockWithReward && lastBlockWithReward != 0) {
+            currentBlock = lastBlockWithReward;
+        }
+
+        // calculate only if the {lastBlockWithReward} is not reached
+        if (
+            currentBlock >= lastDistributionBlock &&
+            _currentRewardPerBlockPerToken > 0
+        ) {
+            uint256 elapsedBlocks = currentBlock - lastDistributionBlock;
             _rewardPerTokenDistributed +=
                 elapsedBlocks *
                 _currentRewardPerBlockPerToken;
 
-            // end of reward
-            if (lastBlock == _timeline.lastBlockWithReward) {
+            // end of distribution
+            if (lastBlockWithReward == currentBlock) {
                 delete _currentRewardPerBlockPerToken;
             }
         }
-        // update last distribution block
+
+        // update distribution block anyway
         _timeline.lastDistributionBlock = uint64(block.number);
     }
 
@@ -295,11 +302,11 @@ contract StakingVaultERC20 is IERC900, Ownable {
         amount +=
             (_currentRewardPerBlockPerToken * _totalStaked * remainingBlocks) /
             PRECISION;
-        emit log(amount);
+
         updatedRBT = _validateRBT(
             amount,
             uint256(int256(_totalStaked) + totalStakedDelta),
-            lastBlock - block.number
+            block.number > lastBlock ? 0 : lastBlock - block.number
         );
         _currentRewardPerBlockPerToken = updatedRBT;
         _timeline.lastBlockWithReward = uint64(lastBlock);
