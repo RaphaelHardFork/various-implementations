@@ -94,6 +94,9 @@ contract StakingVaultERC20 is IERC900, Ownable {
      *      in this case the amount is stored in {_depositPool}. The distribution will start
      *      once an user stake an amount into the contract.
      *
+     *      Considere deposit at least 10**12 token (with 18 decimal) in order to limit amount
+     *      of token stuck in the contract.
+     *
      * Requirement:
      *      - `lastBlock` should be greater than actual block and the previous lastBlock
      *      - combinaison of `amount` & `lastBlock` should result a distribution over zero,
