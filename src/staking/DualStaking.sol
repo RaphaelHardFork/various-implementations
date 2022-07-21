@@ -4,44 +4,32 @@ pragma solidity ^0.8.13;
 
 import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import "openzeppelin-contracts/contracts/access/Ownable.sol";
-import "./IERC900.sol";
+import "./IDualStaking.sol";
 
 /**
  * @notice  This contract allow to distribute ERC20 reward block per block
  *          to users having a staked amount of another ERC20 token.
  *
- * @dev This contract implement the {IERC900} interface.
+ * @dev Implementation of {IDualStaking} interface.
  *
  * This implementation is used for two distinct ERC20 (rewards and staked token),
- * if only one token is used, consider using an anti-compound number of block to avoid,
- * compound on each block.
+ * if only one token is used.
  *
- * {Ownable} contract is used to restrict the {deposit} action to the `owner`, this ownership
- * can be renouced to allow users to add rewards. Anyway the amount of reward per block and per token staked,
- * cannot be lowered.
+ * {Ownable} contract is used to restrict the {deposit}, {unstakeFor} and {closeContract} action to the `owner`,
+ * this ownership can be renouced to allow users to add rewards. {deposit} can be unrestricted as rewards per block
+ * and per token staked cannot be lowered.
  *
  * As rewards are distributed each block, rewards are represented by {_currentRewardPerBlockPerToken},
  * which calculate amount of rewards to distribute to each token staked in the contract.
  *
- * NOTE This contract is not audited, use it with caution.
- *      Utilisation of the {IERC900} seem not to be so relevant.
+ * Note This contract is not audited, use it with caution.
  */
 
-contract StakingVaultERC20 is IERC900, Ownable {
+contract DualStaking is IDualStaking, Ownable {
     uint256 public constant PRECISION = 10**40;
 
-    /// @dev token distributed as rewards
-    address public immutable override token;
-
-    /// @dev token staked in the contract to get rewards
+    address public immutable override rewardToken;
     address public immutable stakedToken;
-
-    /// @dev store values associated with blocks
-    struct Timeline {
-        uint64 depositBlock;
-        uint64 lastDistributionBlock;
-        uint64 lastBlockWithReward;
-    }
 
     /// @dev represents rewards distributed per token staked
     uint256 private _rewardPerTokenDistributed;
@@ -62,18 +50,16 @@ contract StakingVaultERC20 is IERC900, Ownable {
     mapping(address => uint256) private _rewardPerTokenPaid;
     Timeline private _timeline;
 
-    event RewardPaid(address indexed account, uint256 amount);
-
     /**
      * @dev Tokens address are `immutable`, considere using another contract
      * to change reward or staked token.
      *
-     * @param rewardToken   token distributed as rewards
-     * @param stakedToken_  token staked by users
+     * @param _rewardToken   token distributed as rewards
+     * @param _stakedToken  token staked by users
      */
-    constructor(address rewardToken, address stakedToken_) {
-        token = rewardToken;
-        stakedToken = stakedToken_;
+    constructor(address _rewardToken, address _stakedToken) {
+        rewardToken = _rewardToken;
+        stakedToken = _stakedToken;
     }
 
     modifier triggerDistribution() {
@@ -86,27 +72,9 @@ contract StakingVaultERC20 is IERC900, Ownable {
         _;
     }
 
-    /**
-     * @dev Deposit `amount` of {rewardToken} into the contract for the distribution,
-     *      This function is restricted to the `owner`.
-     *
-     *      The distribution start only if the amount staked in the contract is non-null,
-     *      in this case the amount is stored in {_depositPool}. The distribution will start
-     *      once an user stake an amount into the contract.
-     *
-     *      Considere deposit at least 10**12 token (with 18 decimal) in order to limit amount
-     *      of token stuck in the contract.
-     *
-     * Requirement:
-     *      - `lastBlock` should be greater than actual block and the previous lastBlock
-     *      - combinaison of `amount` & `lastBlock` should result a distribution over zero,
-     *      and increase the actual distribution if the distribution is active.
-     *
-     * @param amount    amount of token to deposit into the contract
-     * @param lastBlock last block where distribution will occurs
-     * */
     function deposit(uint256 amount, uint256 lastBlock)
         external
+        override
         onlyOwner
         triggerDistribution
     {
@@ -117,7 +85,7 @@ contract StakingVaultERC20 is IERC900, Ownable {
         );
 
         // transfer token
-        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        IERC20(rewardToken).transferFrom(msg.sender, address(this), amount);
 
         // the amount is stored in {_depositPool} until the contract
         // have tokens staked.
@@ -151,30 +119,20 @@ contract StakingVaultERC20 is IERC900, Ownable {
         uint256 currentRBT = _currentRewardPerBlockPerToken;
         uint256 updatedRBT = _updateRBT(amount, lastBlock, 0);
         require(updatedRBT >= currentRBT, "Staking: lower rewards");
+
+        emit Deposit(msg.sender, updatedRBT, amount, _depositPool);
     }
 
-    /**
-     * @dev Stake an amount in the contract for the `sender`
-     *
-     * @param amount    amount of token to stake
-     * @param data      _
-     */
-    function stake(uint256 amount, bytes calldata data) external override {
-        stakeFor(msg.sender, amount, data);
+    function stake(uint256 amount) external override {
+        stakeFor(msg.sender, amount);
     }
 
-    /**
-     * @dev Stake an amount in the contract for another address
-     *
-     * @param addr      address which will stake tokens
-     * @param amount    amount of token to stake
-     * @param data      _
-     */
-    function stakeFor(
-        address addr,
-        uint256 amount,
-        bytes calldata data
-    ) public override triggerDistribution triggerRewards(addr) {
+    function stakeFor(address account, uint256 amount)
+        public
+        override
+        triggerDistribution
+        triggerRewards(account)
+    {
         uint256 rewardAmount;
         uint256 lastBlock = _timeline.lastBlockWithReward;
 
@@ -191,35 +149,28 @@ contract StakingVaultERC20 is IERC900, Ownable {
         }
 
         // update stake state
-        _stakedAmount[addr] += amount;
+        _stakedAmount[account] += amount;
         _totalStaked += amount;
-        _rewardPerTokenPaid[addr] = _rewardPerTokenDistributed;
-        IERC20(stakedToken).transferFrom(addr, address(this), amount);
-        emit Staked(addr, amount, _totalStaked, data);
+        _rewardPerTokenPaid[account] = _rewardPerTokenDistributed;
+        IERC20(stakedToken).transferFrom(account, address(this), amount);
+        emit Staked(
+            account,
+            _currentRewardPerBlockPerToken,
+            amount,
+            _totalStaked
+        );
     }
 
-    /**
-     * @dev Unstake an amount in the contract for the `sender`
-     *
-     * @param amount    amount of token to unstake
-     * @param data      _
-     */
-    function unstake(uint256 amount, bytes calldata data) external override {
-        unstakeFor(msg.sender, amount, data);
+    function unstake(uint256 amount) external override {
+        unstakeFor(msg.sender, amount);
     }
 
-    /**
-     * @dev Unstake an amount in the contract for another address
-     *
-     * @param account   address which will unstake tokens
-     * @param amount    amount of token to unstake
-     * @param data      _
-     */
-    function unstakeFor(
-        address account,
-        uint256 amount,
-        bytes calldata data
-    ) public triggerDistribution triggerRewards(account) {
+    function unstakeFor(address account, uint256 amount)
+        public
+        override
+        triggerDistribution
+        triggerRewards(account)
+    {
         uint256 lastBlockWithReward = _timeline.lastBlockWithReward;
         // stop distribution if no more token in contract
         if (_totalStaked - amount == 0) {
@@ -245,58 +196,49 @@ contract StakingVaultERC20 is IERC900, Ownable {
         _stakedAmount[account] -= amount;
         _totalStaked -= amount;
         IERC20(stakedToken).transfer(account, amount);
-        emit Unstaked(account, amount, _totalStaked, data);
+        emit Unstaked(
+            account,
+            _currentRewardPerBlockPerToken,
+            amount,
+            _totalStaked
+        );
     }
 
-    function getReward(address account) external triggerDistribution {
+    function getReward(address account) external override triggerDistribution {
         _getReward(account);
     }
 
-    /**
-     * @param addr  address to view balance of staked token
-     * @return amount of token staked by an user
-     */
-    function totalStakedFor(address addr) external view returns (uint256) {
-        return _stakedAmount[addr];
+    function closeContract() external override {
+        //
     }
 
-    /**
-     * @return total amount of token staked in the contract
-     */
-    function totalStaked() external view returns (uint256) {
+    function totalStakedFor(address account)
+        external
+        view
+        override
+        returns (uint256)
+    {
+        return _stakedAmount[account];
+    }
+
+    function totalStaked() external view override returns (uint256) {
         return _totalStaked;
     }
 
-    /**
-     * @return amount of reward distributed per block per token
-     */
-    function currentReward() external view returns (uint256) {
+    function currentReward() external view override returns (uint256) {
         return _currentRewardPerBlockPerToken;
     }
 
-    /**
-     * @return amount of rewards waiting for distribution
-     */
-    function depositPool() external view returns (uint256) {
+    function depositPool() external view override returns (uint256) {
         return _depositPool;
     }
 
-    /**
-     * @return information related to blocks
-     *          - {depositBlock} block where an amount was deposited in {_depositPool}
-     *          - {lastBlockWithReward} last block where distribution will occurs
-     *          - {lastDistributionBlock} last block where rewards were added to {_rewardPerTokenDistributed}
-     */
-    function timeline() external view returns (Timeline memory) {
+    function timeline() external view override returns (Timeline memory) {
         return _timeline;
     }
 
     function getAPR(int256 amount) external view returns (uint256) {
         // calculate RBT with new amount
-    }
-
-    function supportsHistory() external pure returns (bool) {
-        return false;
     }
 
     /**
@@ -346,7 +288,7 @@ contract StakingVaultERC20 is IERC900, Ownable {
 
         if (rewards > 0) {
             emit RewardPaid(account, rewards);
-            IERC20(token).transfer(account, rewards);
+            IERC20(rewardToken).transfer(account, rewards);
         }
     }
 
